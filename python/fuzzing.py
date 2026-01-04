@@ -1,56 +1,92 @@
-import requests
-import argparse
+import aiohttp
+import asyncio
 import sys
+import argparse
 
-# 1. إعداد الـ Arguments بشكل احترافي
-def get_args():
-    parser = argparse.ArgumentParser(description="A professional directory fuzzer tool")
-    parser.add_argument("-u", "--url", required=True, help="Target URL (e.g., http://example.com)")
-    parser.add_argument("-w", "--wordlist", required=True, help="Path to the wordlist file")
-    # ممكن تضيف ميزات مستقبلية هنا بسهولة مثل الـ timeout أو الـ status codes المستبعدة
+
+def getArgs():
+    parser = argparse.ArgumentParser(
+        description="Asynchronous URL fuzzing tool"
+    )
+
+    parser.add_argument(
+        "-u", "--url",
+        required=True,
+        help="Target base URL (e.g. http://example.com)"
+    )
+
+    parser.add_argument(
+        "-w", "--wordlist",
+        required=True,
+        help="Path to wordlist file"
+    )
+
+    parser.add_argument(
+        "-l", "--limit",
+        type=int,
+        default=50,
+        help="Maximum concurrent requests"
+    )
+
     return parser.parse_args()
 
-def dir_brute(base_url, wordlist_path):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Security-Researcher"
-    }
 
-    # استخدام Session لإعادة استخدام الـ Connection وتوفير الوقت
-    session = requests.Session()
-    session.headers.update(headers)
+headers = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "*/*",
+    "Connection": "close"
+}
 
-    try:
-        # التأكد من وجود ملف الـ Wordlist قبل البدء
-        with open(wordlist_path, encoding="utf-8", errors="ignore") as wordlist:
-            print(f"[*] Target: {base_url}")
-            print(f"[*] Wordlist: {wordlist_path}")
-            print("-" * 40)
 
-            for line in wordlist:
-                word = line.strip()
-                if not word or word.startswith("#"): # تخطي السطور الفاضية والتعليقات
-                    continue
-                
-                url = f"{base_url.rstrip('/')}/{word}"
-                
-                try:
-                    response = session.get(url, timeout=5, allow_redirects=False)
-                    status = response.status_code
-                    length = len(response.text)
+async def fetch(session, url, semaphore):
+    async with semaphore:
+        try:
+            async with session.get(url, timeout=5) as response:
+                status = response.status
+                length = response.content_length or 0
 
-                    # فلترة النتائج: استبعاد الـ 404 الشهيرة
-                    if status != 404:
-                        print(f"[{status}] (Size: {length}) -> {url}")
+                if status != 404:
+                    print(f"[{status}] (Size: {length}) -> {url}")
 
-                except requests.exceptions.RequestException:
-                    continue 
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            pass
 
-    except FileNotFoundError:
-        print(f"[!] Error: Wordlist file not found at: {wordlist_path}")
-    except KeyboardInterrupt:
-        print("\n[!] User interrupted the process. Exiting...")
-        sys.exit(0)
+
+async def main():
+    args = getArgs()
+    semaphore = asyncio.Semaphore(args.limit)
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            tasks = []
+
+            with open(args.wordlist, encoding="utf-8") as file:
+                for word in file:
+                    word = word.strip()
+                    if not word:
+                        continue
+
+                    url = f"{args.url.rstrip('/')}/{word}"
+                    tasks.append(
+                        asyncio.create_task(
+                            fetch(session, url, semaphore)
+                        )
+                    )
+
+            if tasks:
+                await asyncio.gather(*tasks)
+
+        except FileNotFoundError:
+            print(f"[!] Error: Wordlist file not found: {args.wordlist}")
+        except KeyboardInterrupt:
+            print("\n[!] User interrupted the process.")
+            sys.exit(0)
+
 
 if __name__ == "__main__":
-    args = get_args()
-    dir_brute(args.url, args.wordlist)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[!] Operation cancelled by user.")
