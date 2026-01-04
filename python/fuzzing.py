@@ -53,30 +53,51 @@ async def fetch(session, url, semaphore):
         except Exception:
             pass
 
+async def worker(queue, session, semaphore, base_url):
+    while True:
+        word = await queue.get()
+        if word is None:  
+            queue.task_done()
+            break
+
+        url = f"{base_url}/{word}"
+        await fetch(session, url, semaphore)
+        queue.task_done()
+
+
 
 async def main():
     args = getArgs()
     semaphore = asyncio.Semaphore(args.limit)
+    queue = asyncio.Queue(maxsize=args.limit * 2)
+
+    base_url = args.url.rstrip("/")
 
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            tasks = []
+            # إنشاء عدد ثابت من الـ workers
+            workers = [
+                asyncio.create_task(worker(queue, session, semaphore, base_url))
+                for _ in range(args.limit)
+            ]
 
+            # Producer: قراءة الملف سطر بسطر بدون تخزين ضخم في الذاكرة
             with open(args.wordlist, encoding="utf-8") as file:
-                for word in file:
-                    word = word.strip()
-                    if not word:
-                        continue
+                for line in file:
+                    word = line.strip()
+                    if word:
+                        await queue.put(word)
 
-                    url = f"{args.url.rstrip('/')}/{word}"
-                    tasks.append(
-                        asyncio.create_task(
-                            fetch(session, url, semaphore)
-                        )
-                    )
+            # إرسال إشارات التوقف (sentinels)
+            for _ in workers:
+                await queue.put(None)
 
-            if tasks:
-                await asyncio.gather(*tasks)
+            # انتظار انتهاء كل المهام
+            await queue.join()
+
+            # انتظار إغلاق كل الـ workers
+            for w in workers:
+                await w
 
         except FileNotFoundError:
             print(f"[!] Error: Wordlist file not found: {args.wordlist}")
